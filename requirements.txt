@@ -1,0 +1,11 @@
+scapy
+web3
+solana
+scikit-learn
+boto3
+azure-identity
+azure-mgmt-network
+google-cloud-compute
+google-cloud-securitycenter
+prometheus-client
+cryptography
