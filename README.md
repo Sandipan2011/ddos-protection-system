@@ -1,4 +1,6 @@
 # 🛡️ DDoS Protection System for Cloud  
+![Python](https://img.shields.io/badge/python-3.8+-blue.svg)
+
 A security-oriented project built with **Python** to detect and mitigate Distributed Denial-of-Service (DDoS) attacks using custom firewall rules, logging, and automated protection.  
 
 ---
@@ -22,15 +24,51 @@ A security-oriented project built with **Python** to detect and mitigate Distrib
 
 ---
 
+## 🛠️ Languages Used
+
+This project is built using **1 programming language**:
+
+- **Python 3** - The primary language for the entire codebase, including core logic, deployment scripts, and cloud integrations.
+
+---
+
 ## 📂 Project Structure
-ddos-protection-system/
-│── main.py # Entry point
-│── firewall.py # Core firewall logic
-│── gui.py # GUI for managing firewall
-│── requirements.txt # Dependencies
-│── README.md # Documentation
-│── firewall.log # Logs of blocked IPs
-│── .gitignore # Ignore unnecessary files
+```
+D-D-O-S PROTECTION SYSTEM/
+├── deploy_aws.py          # AWS deployment script
+├── deploy_azure.py        # Azure deployment script
+├── deploy_gcp.py          # GCP deployment script
+├── main.py                # Entry point
+├── README.md              # Documentation
+├── requirements.txt       # Dependencies
+├── test_ddos.py           # Test script
+├── logs/
+│   └── firewall.log       # Logs of blocked IPs
+└── src/
+    ├── __init__.py
+    ├── blockchain_integration.py
+    ├── cloud_protection/
+    │   ├── __init__.py
+    │   ├── aws_protection.py
+    │   ├── azure_protection.py
+    │   └── gcp_protection.py
+    ├── firewall/
+    │   ├── __init__.py
+    │   └── firewall.py
+    └── selfhealing/
+        ├── __init__.py
+        └── selfhealing.py
+
+mod-ddos-protection-system/
+├── firewall.exe
+├── logs/
+│   └── firewall.log
+└── src/
+    ├── firewall/
+    │   ├── firewall.exe
+    │   └── ultra-secure-firewall.exe
+    └── selfhealing/
+```
 
 ---
 
@@ -38,21 +76,22 @@ ddos-protection-system/
 ### 🔹 1. Clone the Repository
 ```bash
 git clone https://github.com/Sandipan2011/ddos-protection-system.git
-cd ddos-protection-system
+cd "D-D-O-S PROTECTION SYSTEM"
+```
 
----
-
-##Install Requirements
+### 🔹 2. Install Requirements
+```bash
 pip install -r requirements.txt
+```
 
----
-
-##Run the System
+### 🔹 3. Run the System
+```bash
 python main.py
+```
 
 ---
 
-##Future Improvements
+## 🚀 Future Improvements
 AI-based Threat Scoring system 🧠
 GeoIP Detection 🌍
 Advanced Web Dashboard for live monitoring 📈
