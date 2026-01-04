@@ -6,14 +6,21 @@ Main entry point for the D-D-O-S PROTECTION SYSTEM
 import sys
 import os
 import logging
+import json
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
 
 # Add src to path
 sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 
 from firewall.firewall import Firewall
 from selfhealing.selfhealing import SelfHealing
-from blockchain_integration import BlockchainIntegration
+try:
+    from blockchain_integration import BlockchainIntegration
+    blockchain_available = True
+except ImportError as e:
+    print(f"Blockchain integration not available: {e}")
+    blockchain_available = False
 from cloud_protection import AWSProtection, AzureProtection, GCPProtection
 
 # Setup logging
@@ -27,10 +34,13 @@ def main():
     # Initialize components
     firewall = Firewall()
     self_healing = SelfHealing()
-    blockchain = BlockchainIntegration()
+    if blockchain_available:
+        blockchain = BlockchainIntegration()
+        blockchain.initialize()
+    else:
+        print("Skipping blockchain integration due to import error.")
 
     firewall.initialize()
-    blockchain.initialize()
     self_healing.initialize()
 
     # Initialize cloud protection (optional)
