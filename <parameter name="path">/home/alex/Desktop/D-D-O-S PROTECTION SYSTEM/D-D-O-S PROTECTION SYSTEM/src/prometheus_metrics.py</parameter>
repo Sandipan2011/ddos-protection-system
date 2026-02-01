@@ -1,0 +1,648 @@
+<parameter name="content">#!/usr/bin/env python3
+"""
+Prometheus Metrics and Alerting Module for DDoS Protection System
+Provides real-time monitoring, metrics export, and alerting capabilities
+"""
+
+import threading
+import time
+import logging
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Callable, Any
+from dataclasses import dataclass, field
+from enum import Enum
+import json
+
+# Prometheus client imports (optional - will work without)
+try:
+    from prometheus_client import Counter, Gauge, Histogram, Summary, start_http_server, REGISTRY, CollectorRegistry
+    PROMETHEUS_AVAILABLE = True
+except ImportError:
+    PROMETHEUS_AVAILABLE = False
+    # Create stub classes for when prometheus_client is not available
+    class Counter:
+        def __init__(self, name, description, labels=None):
+            self._value = 0
+            self._name = name
+            self._description = description
+        def labels(self, **kwargs):
+            return self
+        def inc(self, amount=1):
+            self._value += amount
+    
+    class Gauge:
+        def __init__(self, name, description, labels=None):
+            self._value = 0
+            self._name = name
+        def labels(self, **kwargs):
+            return self
+        def set(self, value):
+            self._value = value
+        def inc(self, amount=1):
+            self._value += amount
+        def dec(self, amount=1):
+            self._value -= amount
+    
+    class Histogram:
+        def __init__(self, name, description, buckets=None, labels=None):
+            self._name = name
+        def labels(self, **kwargs):
+            return self
+        def observe(self, value):
+            pass
+    
+    class Summary:
+        def __init__(self, name, description, labels=None):
+            self._name = name
+        def labels(self, **kwargs):
+            return self
+        def observe(self, value):
+            pass
+    
+    class CollectorRegistry:
+        def __init__(self):
+            pass
+        def register(self, obj):
+            pass
+    
+    REGISTRY = CollectorRegistry()
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+class AlertSeverity(Enum):
+    CRITICAL = "critical"
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+    INFO = "info"
+
+
+class AlertStatus(Enum):
+    FIRING = "firing"
+    RESOLVED = "resolved"
+    PENDING = "pending"
+
+
+@dataclass
+class Alert:
+    """Alert definition"""
+    name: str
+    description: str
+    severity: AlertSeverity
+    status: AlertStatus
+    labels: Dict[str, str] = field(default_factory=dict)
+    annotations: Dict[str, str] = field(default_factory=dict)
+    starts_at: datetime = field(default_factory=datetime.now)
+    ends_at: Optional[datetime] = None
+    generator: str = "ddos-protection"
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "description": self.description,
+            "severity": self.severity.value,
+            "status": self.status.value,
+            "labels": self.labels,
+            "annotations": self.annotations,
+            "startsAt": self.starts_at.isoformat(),
+            "endsAt": self.ends_at.isoformat() if self.ends_at else None,
+            "generator": self.generator
+        }
+
+
+@dataclass
+class AlertRule:
+    """Alert rule definition"""
+    name: str
+    expr: str
+    for_duration: int = 60
+    severity: AlertSeverity = AlertSeverity.MEDIUM
+    labels: Dict[str, str] = field(default_factory=dict)
+    annotations: Dict[str, str] = field(default_factory=dict)
+    enabled: bool = True
+
+
+class MetricsCollector:
+    """Collects and exports DDoS protection metrics"""
+    
+    def __init__(self, registry=None):
+        self.registry = registry or REGISTRY
+        self.running = False
+        self.lock = threading.Lock()
+        self._init_metrics()
+        
+        self._packets_total = 0
+        self._bytes_total = 0
+        self._attacks_detected = 0
+        self._attacks_blocked = 0
+        self._active_connections = 0
+        self._blocked_ips_count = 0
+        self._cpu_usage = 0.0
+        self._memory_usage = 0.0
+        
+        self._packet_history: List[tuple] = []
+        self._attack_history: List[tuple] = []
+        self._history_max_points = 1000
+        
+        self.alert_callbacks: List[Callable[[Alert], None]] = []
+        
+    def _init_metrics(self):
+        """Initialize Prometheus metrics"""
+        if PROMETHEUS_AVAILABLE:
+            self.packets_total = Counter(
+                'ddos_packets_total', 'Total packets processed',
+                ['protocol', 'direction'], registry=self.registry)
+            self.attacks_detected = Counter(
+                'ddos_attacks_detected_total', 'Total attacks detected',
+                ['attack_type', 'severity'], registry=self.registry)
+            self.attacks_blocked = Counter(
+                'ddos_attacks_blocked_total', 'Total attacks blocked',
+                ['attack_type'], registry=self.registry)
+            self.blocked_ips = Counter(
+                'ddos_blocked_ips_total', 'Total IPs blocked',
+                ['reason'], registry=self.registry)
+            self.active_connections = Gauge(
+                'ddos_active_connections', 'Currently active connections',
+                registry=self.registry)
+            self.blocked_ips_count = Gauge(
+                'ddos_blocked_ips_count', 'Number of currently blocked IPs',
+                registry=self.registry)
+            self.cpu_usage = Gauge(
+                'ddos_cpu_usage_percent', 'CPU usage percentage',
+                registry=self.registry)
+            self.memory_usage = Gauge(
+                'ddos_memory_usage_percent', 'Memory usage percentage',
+                registry=self.registry)
+            self.system_status = Gauge(
+                'ddos_system_status', 'System status (1=healthy, 0=unhealthy)',
+                registry=self.registry)
+            self.packet_size = Histogram(
+                'ddos_packet_size_bytes', 'Packet size distribution',
+                buckets=[64, 128, 256, 512, 1024, 1500, 9000], registry=self.registry)
+            self.response_time = Histogram(
+                'ddos_response_time_ms', 'Response time in milliseconds',
+                buckets=[1, 5, 10, 25, 50, 100, 250, 500, 1000], registry=self.registry)
+            self.threat_score = Summary(
+                'ddos_threat_score', 'Current threat score',
+                registry=self.registry)
+        else:
+            self.metrics = {
+                'packets_total': {'value': 0, 'labels': {}},
+                'attacks_detected': {'value': 0, 'labels': {}},
+                'attacks_blocked': {'value': 0, 'labels': {}},
+                'active_connections': {'value': 0},
+                'blocked_ips_count': {'value': 0},
+                'cpu_usage': {'value': 0.0},
+                'memory_usage': {'value': 0.0}
+            }
+    
+    def start(self, port: int = 8000):
+        """Start the metrics HTTP server"""
+        self.running = True
+        if PROMETHEUS_AVAILABLE:
+            start_http_server(port)
+            logger.info(f"Prometheus metrics server started on port {port}")
+        else:
+            logger.warning("prometheus_client not available, using internal HTTP server")
+            threading.Thread(target=self._start_internal_server, args=(port,), daemon=True).start()
+    
+    def _start_internal_server(self, port: int):
+        from http.server import HTTPServer, BaseHTTPRequestHandler
+        class MetricsHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == '/metrics':
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'text/plain')
+                    self.end_headers()
+                    self.wfile.write(b'# Prometheus metrics not available\n# Install prometheus-client to enable\n')
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+            def log_message(self, format, *args):
+                pass
+        server = HTTPServer(('0.0.0.0', port), MetricsHandler)
+        server.serve_forever()
+    
+    def stop(self):
+        self.running = False
+    
+    def record_packet(self, protocol: str = "tcp", direction: str = "inbound", size: int = 64):
+        with self.lock:
+            self._packets_total += 1
+            self._packet_history.append((datetime.now(), size))
+            if len(self._packet_history) > self._history_max_points:
+                self._packet_history = self._packet_history[-self._history_max_points:]
+        if PROMETHEUS_AVAILABLE:
+            self.packets_total.labels(protocol=protocol, direction=direction).inc()
+            self.packet_size.observe(size)
+    
+    def record_attack(self, attack_type: str, severity: str = "high", blocked: bool = True):
+        with self.lock:
+            self._attacks_detected += 1
+            self._attack_history.append((datetime.now(), attack_type, severity))
+            if blocked:
+                self._attacks_blocked += 1
+        if PROMETHEUS_AVAILABLE:
+            self.attacks_detected.labels(attack_type=attack_type, severity=severity).inc()
+            if blocked:
+                self.attacks_blocked.labels(attack_type=attack_type).inc()
+    
+    def record_blocked_ip(self, ip: str, reason: str = "rate_exceeded"):
+        with self.lock:
+            self._blocked_ips_count += 1
+        if PROMETHEUS_AVAILABLE:
+            self.blocked_ips.labels(reason=reason).inc()
+            self.blocked_ips_count.set(self._blocked_ips_count)
+    
+    def set_active_connections(self, count: int):
+        with self.lock:
+            self._active_connections = count
+        if PROMETHEUS_AVAILABLE:
+            self.active_connections.set(count)
+    
+    def set_resource_usage(self, cpu_percent: float, memory_percent: float):
+        with self.lock:
+            self._cpu_usage = cpu_percent
+            self._memory_usage = memory_percent
+        if PROMETHEUS_AVAILABLE:
+            self.cpu_usage.set(cpu_percent)
+            self.memory_usage.set(memory_percent)
+    
+    def set_system_status(self, healthy: bool):
+        if PROMETHEUS_AVAILABLE:
+            self.system_status.set(1 if healthy else 0)
+    
+    def set_threat_score(self, score: float):
+        if PROMETHEUS_AVAILABLE:
+            self.threat_score.observe(score)
+    
+    def record_response_time(self, ms: float):
+        if PROMETHEUS_AVAILABLE:
+            self.response_time.observe(ms)
+    
+    def get_metrics_summary(self) -> Dict[str, Any]:
+        with self.lock:
+            now = datetime.now()
+            last_minute = [p for p in self._packet_history if (now - p[0]).total_seconds() < 60]
+            packet_rate = len(last_minute) if last_minute else 0
+            recent_attacks = [a for a in self._attack_history if (now - a[0]).total_seconds() < 300]
+            attack_types = {}
+            for _, atk_type, severity in recent_attacks:
+                attack_types[atk_type] = attack_types.get(atk_type, 0) + 1
+            
+            return {
+                "packets_total": self._packets_total,
+                "packet_rate_per_minute": packet_rate,
+                "attacks_detected": self._attacks_detected,
+                "attacks_blocked": self._attacks_blocked,
+                "active_connections": self._active_connections,
+                "blocked_ips_count": self._blocked_ips_count,
+                "cpu_usage_percent": self._cpu_usage,
+                "memory_usage_percent": self._memory_usage,
+                "recent_attacks_5min": len(recent_attacks),
+                "attack_types_5min": attack_types
+            }
+
+
+class AlertManager:
+    """Manages alerting rules and notifications"""
+    
+    def __init__(self, metrics_collector: MetricsCollector = None):
+        self.metrics_collector = metrics_collector
+        self.rules: List[AlertRule] = []
+        self.active_alerts: Dict[str, Alert] = {}
+        self.alert_callbacks: List[Callable[[Alert], None]] = []
+        self.lock = threading.Lock()
+        self._init_default_rules()
+        self.running = False
+        self.eval_thread: threading.Thread = None
+    
+    def _init_default_rules(self):
+        default_rules = [
+            AlertRule(name="HighCPUUsage", expr="cpu > 80", for_duration=120,
+                     severity=AlertSeverity.HIGH, annotations={"summary": "CPU usage is high"}),
+            AlertRule(name="HighMemoryUsage", expr="memory > 85", for_duration=180,
+                     severity=AlertSeverity.HIGH, annotations={"summary": "Memory usage is high"}),
+            AlertRule(name="HighPacketRate", expr="packet_rate > 10000", for_duration=60,
+                     severity=AlertSeverity.HIGH, annotations={"summary": "Packet rate exceeded 10k/s"}),
+            AlertRule(name="AttackDetected", expr="attacks > 10", for_duration=30,
+                     severity=AlertSeverity.CRITICAL, annotations={"summary": "Multiple attacks detected"}),
+            AlertRule(name="ManyBlockedIPs", expr="blocked_ips > 1000", for_duration=300,
+                     severity=AlertSeverity.MEDIUM, annotations={"summary": "Many IPs blocked"}),
+            AlertRule(name="SYN_Flood", expr="syn_flood > 50", for_duration=30,
+                     severity=AlertSeverity.CRITICAL, annotations={"summary": "SYN flood detected"}),
+            AlertRule(name="UDP_Flood", expr="udp_flood > 50", for_duration=30,
+                     severity=AlertSeverity.CRITICAL, annotations={"summary": "UDP flood detected"}),
+        ]
+        self.rules = default_rules
+    
+    def start(self, eval_interval: int = 10):
+        self.running = True
+        self.eval_thread = threading.Thread(target=self._eval_loop, args=(eval_interval,), daemon=True)
+        self.eval_thread.start()
+        logger.info("Alert manager started")
+    
+    def stop(self):
+        self.running = False
+        if self.eval_thread:
+            self.eval_thread.join(timeout=5)
+        logger.info("Alert manager stopped")
+    
+    def _eval_loop(self, interval: int):
+        while self.running:
+            try:
+                self.evaluate_all()
+            except Exception as e:
+                logger.error(f"Alert evaluation error: {e}")
+            time.sleep(interval)
+    
+    def evaluate_all(self):
+        if not self.metrics_collector:
+            return
+        metrics = self.metrics_collector.get_metrics_summary()
+        with self.lock:
+            for rule in self.rules:
+                if not rule.enabled:
+                    continue
+                try:
+                    should_fire = self._evaluate_rule(rule, metrics)
+                    if should_fire:
+                        if rule.name not in self.active_alerts:
+                            alert = self._create_alert(rule, metrics)
+                            self.active_alerts[rule.name] = alert
+                            self._trigger_alert(alert)
+                    else:
+                        if rule.name in self.active_alerts:
+                            alert = self.active_alerts[rule.name]
+                            alert.status = AlertStatus.RESOLVED
+                            alert.ends_at = datetime.now()
+                            del self.active_alerts[rule.name]
+                            self._trigger_alert(alert)
+                except Exception as e:
+                    logger.error(f"Error evaluating rule {rule.name}: {e}")
+    
+    def _evaluate_rule(self, rule: AlertRule, metrics: Dict) -> bool:
+        expr = rule.expr
+        try:
+            if "cpu" in expr and "> 80" in expr:
+                return metrics.get('cpu_usage_percent', 0) > 80
+            elif "memory" in expr and "> 85" in expr:
+                return metrics.get('memory_usage_percent', 0) > 85
+            elif "packet_rate" in expr and "> 10000" in expr:
+                return metrics.get('packet_rate_per_minute', 0) > 10000
+            elif "attacks" in expr and "> 10" in expr:
+                return metrics.get('recent_attacks_5min', 0) > 10
+            elif "blocked_ips" in expr and "> 1000" in expr:
+                return metrics.get('blocked_ips_count', 0) > 1000
+            elif "syn_flood" in expr:
+                atk = metrics.get('attack_types_5min', {}).get('SYN_FLOOD', 0)
+                return atk > 50
+            elif "udp_flood" in expr:
+                atk = metrics.get('attack_types_5min', {}).get('UDP_FLOOD', 0)
+                return atk > 50
+            return False
+        except Exception as e:
+            logger.error(f"Expression evaluation error: {e}")
+            return False
+    
+    def _create_alert(self, rule: AlertRule, metrics: Dict) -> Alert:
+        return Alert(
+            name=rule.name,
+            description=rule.annotations.get('summary', rule.name),
+            severity=rule.severity,
+            status=AlertStatus.FIRING,
+            labels={"alertname": rule.name, "severity": rule.severity.value},
+            annotations=rule.annotations
+        )
+    
+    def _trigger_alert(self, alert: Alert):
+        logger.warning(f"ALERT: {alert.name} - {alert.severity.value}")
+        for callback in self.alert_callbacks:
+            try:
+                callback(alert)
+            except Exception as e:
+                logger.error(f"Alert callback error: {e}")
+    
+    def add_callback(self, callback: Callable[[Alert], None]):
+        self.alert_callbacks.append(callback)
+    
+    def add_rule(self, rule: AlertRule):
+        with self.lock:
+            self.rules.append(rule)
+    
+    def get_active_alerts(self) -> List[Alert]:
+        with self.lock:
+            return list(self.active_alerts.values())
+    
+    def get_alerts_for_prometheus(self) -> Dict:
+        alerts = []
+        for alert in self.active_alerts.values():
+            alerts.append(alert.to_dict())
+        return {"alerts": alerts}
+
+
+class GrafanaDashboardConfig:
+    """Generates Grafana dashboard configuration"""
+    
+    @staticmethod
+    def get_dashboard_json(title: str = "DDoS Protection System") -> Dict:
+        return {
+            "annotations": {"list": [{"builtIn": 1, "datasource": "-- Grafana --",
+                "enable": True, "hide": True, "iconColor": "rgba(0, 211, 255, 1)",
+                "name": "Annotations & Alerts", "type": "dashboard"}]},
+            "editable": True, "gnetId": None, "graphTooltip": 0, "id": None,
+            "links": [], "panels": [
+                {"cacheTimeout": None, "colorBackground": False, "colorValue": True,
+                 "colors": ["#299c46", "rgba(237, 129, 40, 0.89)", "#d44a3a"],
+                 "format": "none", "gauge": {"maxValue": 100, "minValue": 0, "show": False,
+                 "thresholdLabels": False, "thresholdMarkers": True},
+                 "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0}, "id": 1,
+                 "mappingType": 1, "mappingTypes": [{"name": "value to text", "value": 1},
+                 {"name": "range to text", "value": 2}], "maxDataPoints": 100,
+                 "options": {}, "targets": [{"expr": "ddos_system_status", "refId": "A"}],
+                 "thresholds": "0,1", "title": "System Status", "type": "singlestat",
+                 "valueFontSize": "80%", "valueMaps": [{"op": "=", "text": "HEALTHY", "value": "1"},
+                 {"op": "=", "text": "UNHEALTHY", "value": "0"}], "valueName": "current"},
+                {"cacheTimeout": None, "colorBackground": False, "colorValue": True,
+                 "colors": ["#299c46", "rgba(237, 129, 40, 0.89)", "#d44a3a"],
+                 "format": "percent", "gauge": {"maxValue": 100, "minValue": 0, "show": True,
+                 "thresholdLabels": False, "thresholdMarkers": True},
+                 "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0}, "id": 2,
+                 "options": {}, "targets": [{"expr": "ddos_cpu_usage_percent", "refId": "A"}],
+                 "thresholds": "70,85", "title": "CPU Usage", "type": "singlestat",
+                 "valueFontSize": "80%", "valueName": "current"},
+                {"cacheTimeout": None, "colorBackground": False, "colorValue": True,
+                 "colors": ["#299c46", "rgba(237, 129, 40, 0.89)", "#d44a3a"],
+                 "format": "percent", "gauge": {"maxValue": 100, "minValue": 0, "show": True,
+                 "thresholdLabels": False, "thresholdMarkers": True},
+                 "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0}, "id": 3,
+                 "options": {}, "targets": [{"expr": "ddos_memory_usage_percent", "refId": "A"}],
+                 "thresholds": "75,90", "title": "Memory Usage", "type": "singlestat",
+                 "valueFontSize": "80%", "valueName": "current"},
+                {"cacheTimeout": None, "colorBackground": False, "colorValue": True,
+                 "colors": ["#299c46", "rgba(237, 129, 40, 0.89)", "#d44a3a"],
+                 "format": "none", "gauge": {"maxValue": 100, "minValue": 0, "show": False,
+                 "thresholdLabels": False, "thresholdMarkers": True},
+                 "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0}, "id": 4,
+                 "targets": [{"expr": "ddos_blocked_ips_count", "refId": "A"}],
+                 "thresholds": "100,500", "title": "Blocked IPs", "type": "singlestat",
+                 "valueFontSize": "80%", "valueName": "current"},
+                {"aliasColors": {}, "bars": False, "dashLength": 10, "dashes": False,
+                 "fill": 1, "fillGradient": 0, "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+                 "id": 5, "legend": {"avg": False, "current": False, "max": False, "min": False,
+                 "show": True, "total": False, "values": False}, "lines": True, "linewidth": 1,
+                 "nullPointMode": "null", "options": {"dataLinks": []}, "percentage": False,
+                 "pointradius": 2, "points": False, "renderer": "flot", "seriesOverrides": [],
+                 "stack": False, "steppedLine": False,
+                 "targets": [{"expr": "rate(ddos_packets_total[1m])", "legendFormat": "Packets/sec", "refId": "A"}],
+                 "title": "Packet Rate", "tooltip": {"shared": True, "sort": 0, "value_type": "individual"},
+                 "type": "graph", "xaxis": {"buckets": None, "mode": "time", "show": True, "values": []},
+                 "yaxes": [{"format": "short", "show": True}, {"format": "short", "show": True}]},
+                {"aliasColors": {}, "bars": False, "dashLength": 10, "dashes": False,
+                 "fill": 1, "fillGradient": 0, "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+                 "id": 6, "legend": {"avg": False, "current": False, "max": False, "min": False,
+                 "show": True, "total": False, "values": False}, "lines": True, "linewidth": 1,
+                 "nullPointMode": "null", "options": {"dataLinks": []}, "percentage": False,
+                 "pointradius": 2, "points": False, "renderer": "flot", "seriesOverrides": [],
+                 "stack": False, "steppedLine": False,
+                 "targets": [{"expr": "increase(ddos_attacks_detected_total[5m])", "legendFormat": "{{attack_type}}", "refId": "A"}],
+                 "title": "Attacks Detected (5m)", "tooltip": {"shared": True, "sort": 0, "value_type": "individual"},
+                 "type": "graph", "xaxis": {"buckets": None, "mode": "time", "show": True, "values": []},
+                 "yaxes": [{"format": "short", "show": True}, {"format": "short", "show": True}]}
+            ], "refresh": "5s", "schemaVersion": 22, "style": "dark",
+            "tags": ["ddos", "protection", "security"], "templating": {"list": []},
+            "time": {"from": "now-6h", "to": "now"},
+            "timepicker": {"refresh_intervals": ["5s", "10s", "30s", "1m", "5m", "15m", "30m", "1h", "2h", "1d"]},
+            "timezone": "", "title": title, "uid": "ddos-protection-dashboard", "version": 1}
+    
+    @staticmethod
+    def save_dashboard(filepath: str, title: str = "DDoS Protection System"):
+        dashboard = GrafanaDashboardConfig.get_dashboard_json(title)
+        with open(filepath, 'w') as f:
+            json.dump(dashboard, f, indent=2)
+        logger.info(f"Dashboard saved to {filepath}")
+
+
+class PrometheusAlertRules:
+    """Generates Prometheus alert rules configuration"""
+    
+    @staticmethod
+    def get_alerts_yaml() -> str:
+        return '''groups:
+- name: ddos-protection-alerts
+  rules:
+  - alert: HighCPUUsage
+    expr: ddos_cpu_usage_percent > 80
+    for: 2m
+    labels:
+      severity: high
+    annotations:
+      summary: CPU usage is high
+  
+  - alert: HighMemoryUsage
+    expr: ddos_memory_usage_percent > 85
+    for: 3m
+    labels:
+      severity: high
+    annotations:
+      summary: Memory usage is high
+  
+  - alert: HighPacketRate
+    expr: rate(ddos_packets_total[1m]) > 10000
+    for: 1m
+    labels:
+      severity: high
+    annotations:
+      summary: Packet rate exceeded 10,000/s
+  
+  - alert: AttackDetected
+    expr: increase(ddos_attacks_detected_total[1m]) > 10
+    for: 30s
+    labels:
+      severity: critical
+    annotations:
+      summary: Multiple attacks detected
+  
+  - alert: ManyBlockedIPs
+    expr: ddos_blocked_ips_count > 1000
+    for: 5m
+    labels:
+      severity: medium
+    annotations:
+      summary: More than 1000 IPs blocked
+  
+  - alert: SystemUnhealthy
+    expr: ddos_system_status == 0
+    for: 1m
+    labels:
+      severity: critical
+    annotations:
+      summary: System health check failed
+  
+  - alert: SYN_Flood
+    expr: increase(ddos_attacks_detected_total{attack_type="syn_flood"}[1m]) > 50
+    for: 30s
+    labels:
+      severity: critical
+    annotations:
+      summary: SYN flood detected
+  
+  - alert: UDP_Flood
+    expr: increase(ddos_attacks_detected_total{attack_type="udp_flood"}[1m]) > 50
+    for: 30s
+    labels:
+      severity: critical
+    annotations:
+      summary: UDP flood detected
+'''
+
+    @staticmethod
+    def save_alerts(filepath: str):
+        with open(filepath, 'w') as f:
+            f.write(PrometheusAlertRules.get_alerts_yaml())
+        logger.info(f"Alert rules saved to {filepath}")
+
+
+if __name__ == "__main__":
+    print("Prometheus Metrics and Alerting Demo")
+    print("=" * 50)
+    
+    collector = MetricsCollector()
+    collector.start(port=8000)
+    print("✓ Metrics server started on port 8000")
+    
+    alert_manager = AlertManager(collector)
+    
+    def print_alert(alert: Alert):
+        print(f"  Alert: {alert.name} - {alert.severity.value} - {alert.status.value}")
+    
+    alert_manager.add_callback(print_alert)
+    alert_manager.start(eval_interval=5)
+    print("✓ Alert manager started")
+    
+    # Simulate metrics
+    for i in range(10):
+        collector.record_packet("tcp", "inbound", 1500)
+        collector.record_attack("SYN_FLOOD", "high", True)
+        collector.set_resource_usage(45.0 + i * 2, 60.0)
+        collector.set_active_connections(500 + i * 50)
+        time.sleep(1)
+    
+    print("\nActive Alerts:")
+    for alert in alert_manager.get_active_alerts():
+        print(f"  - {alert.name}: {alert.description}")
+    
+    # Save dashboard config
+    GrafanaDashboardConfig.save_dashboard("/tmp/ddos-dashboard.json")
+    print("✓ Grafana dashboard saved")
+    
+    # Save alert rules
+    PrometheusAlertRules.save_alerts("/tmp/ddos-alerts.yml")
+    print("✓ Prometheus alert rules saved")
+    
+    print("\nDemo complete! Access metrics at http://localhost:8000/metrics")
+
+</parameter>
