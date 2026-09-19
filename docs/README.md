@@ -2,7 +2,7 @@
 
 A security-focused Python project designed to detect, monitor, and mitigate Distributed Denial-of-Service (DDoS) attacks using firewall automation, threat logging, and cloud-aware protection workflows.
 
-[![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/) [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey.svg)](https://github.com/Sandipan2011/ddos-protection-system) [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/) [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey.svg)](https://github.com/Sandipan2011/ddos-protection-system) [![License](https://img.shields.io/badge/license-MIT-green.svg)](../LICENSE)
 
 ---
 
@@ -177,7 +177,7 @@ Contributions are welcome. For significant changes, please open an issue first t
 
 ## License
 
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License. See the [LICENSE](../LICENSE) file for details.
 
 ---
 
